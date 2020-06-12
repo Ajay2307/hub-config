@@ -1,0 +1,462 @@
+jupyterhub_config.py:
+----
+import os
+import re
+import sys
+
+from tornado.httpclient import AsyncHTTPClient
+from kubernetes import client
+from jupyterhub.utils import url_path_join
+
+# Make sure that modules placed in the same directory as the jupyterhub config are added to the pythonpath
+configuration_directory = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, configuration_directory)
+
+from z2jh import get_config, set_config_if_not_none
+
+# Configure JupyterHub to use the curl backend for making HTTP requests,
+# rather than the pure-python implementations. The default one starts
+# being too slow to make a large number of requests to the proxy API
+# at the rate required.
+# AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
+
+c.JupyterHub.spawner_class = 'kubespawner.KubeSpawner'
+
+# Connect to a proxy running in a different pod
+
+# Do not shut down user pods when hub is restarted
+#c.JupyterHub.cleanup_servers = False
+
+# Check that the proxy has routes appropriately setup
+c.JupyterHub.last_activity_interval = 60
+
+# Don't wait at all before redirecting a spawning user to the progress page
+c.JupyterHub.tornado_settings = {
+    'slow_spawn_timeout': 0,
+}
+
+
+def camelCaseify(s):
+    """convert snake_case to camelCase
+
+    For the common case where some_value is set from someValue
+    so we don't have to specify the name twice.
+    """
+    return re.sub(r"_([a-z])", lambda m: m.group(1).upper(), s)
+
+
+# configure the hub db connection
+
+# the hub should listen on all interfaces, so the proxy can access it
+
+# this duplicates the jupyterhub.commonLabels helper
+common_labels = c.KubeSpawner.common_labels = {}
+common_labels['app'] = get_config(
+    "nameOverride",
+    default=get_config("Chart.Name", "jupyterhub"),
+)
+common_labels['heritage'] = "jupyterhub"
+chart_name = get_config('Chart.Name')
+chart_version = get_config('Chart.Version')
+if chart_name and chart_version:
+    common_labels['chart'] = "{}-{}".format(
+        chart_name, chart_version.replace('+', '_'),
+    )
+release = get_config('Release.Name')
+if release:
+    common_labels['release'] = release
+
+c.KubeSpawner.namespace = os.environ.get('POD_NAMESPACE', 'default')
+
+c.Spawner.default_url = '/lab'
+
+# Jupyterhub Log level
+c.JupyterHub.log_level = 'DEBUG'
+c.Spawner.http_timeout = 1800000
+c.Authenticator.auto_login = True
+c.JupyterHub.logo_file = os.path.abspath('/opt/app-root/share/jupyterhub/static/images/jupyter.png')
+
+# Max number of consecutive failures before the Hub restarts itself
+# requires jupyterhub 0.9.2
+"""
+# Configure dynamically provisioning pvc
+storage_type = get_config('singleuser.storage.type')
+
+if storage_type == 'dynamic':
+    pvc_name_template = get_config('singleuser.storage.dynamic.pvcNameTemplate')
+    c.KubeSpawner.pvc_name_template = pvc_name_template
+    volume_name_template = get_config('singleuser.storage.dynamic.volumeNameTemplate')
+    c.KubeSpawner.storage_pvc_ensure = True
+    #set_config_if_not_none(c.KubeSpawner, 'storage_class', 'singleuser.storage.dynamic.storageClass')
+    #set_config_if_not_none(c.KubeSpawner, 'storage_access_modes', 'singleuser.storage.dynamic.storageAccessModes')
+    #set_config_if_not_none(c.KubeSpawner, 'storage_capacity', 'singleuser.storage.capacity')
+
+    # Add volumes to singleuser pods
+    c.KubeSpawner.volumes = [
+        {
+            'name': 'data',
+            'persistentVolumeClaim': {
+                'claimName': pvc_name_template
+            }
+        }
+    ]
+    c.KubeSpawner.volume_mounts = [
+        {
+            'mountPath': '/home/MyData',
+            'name': 'data'
+        }
+    ]
+elif storage_type == 'static':
+    #pvc_claim_name = get_config('singleuser.storage.static.pvcName')
+    c.KubeSpawner.volumes = [{
+        'name': 'data',
+        'persistentVolumeClaim': {
+            'claimName': pvc_claim_name
+        }
+    }]
+
+    c.KubeSpawner.volume_mounts = [{
+        'mountPath': '/home/MyData',
+        'name': 'data'
+      #  'subPath': get_config('singleuser.storage.static.subPath')
+    }]
+c.KubeSpawner.volumes.extend(get_config('singleuser.storage.extraVolumes', []))
+c.KubeSpawner.volume_mounts.extend(get_config('singleuser.storage.extraVolumeMounts', []))
+"""
+c.KubeSpawner.user_storage_pvc_ensure = True
+c.KubeSpawner.pvc_name_template = 'iventura-nb-{username}'
+c.KubeSpawner.user_storage_capacity = '1Gi'
+c.KubeSpawner.volumes = [
+    {
+        'name': 'data',
+        'persistentVolumeClaim': {
+            'claimName': c.KubeSpawner.pvc_name_template
+        }
+    }
+]
+
+c.KubeSpawner.volume_mounts = [
+    {
+        'name': 'data',
+        'mountPath': '/home/MyData'
+    }
+]
+c.KubeSpawner.volumes.extend(get_config('singleuser.storage.extraVolumes', []))
+c.KubeSpawner.volume_mounts.extend(get_config('singleuser.storage.extraVolumeMounts', []))
+
+# Gives spawned containers access to the API of the hub
+
+# Allow switching authenticators easily # Enable admins to access user server
+
+values.yaml:
+----
+Chart:
+  Name: jupyterhub
+  Version: 0.9.0
+Release:
+  Name: jhub
+  Namespace: jhub
+  Service: Tiller
+auth:
+  admin:
+    access: true
+    users: null
+  dummy:
+    password: null
+  ldap:
+    dn:
+      search: {}
+      user: {}
+    user: {}
+  state:
+    enabled: false
+  type: dummy
+  whitelist:
+    users: null
+cull:
+  concurrency: 10
+  enabled: true
+  every: 600
+  maxAge: 0
+  removeNamedServers: false
+  timeout: 3600
+  users: false
+custom: {}
+debug:
+  enabled: false
+hub:
+  activeServerLimit: null
+  allowNamedServers: false
+  annotations: {}
+  authenticatePrometheus: null
+  baseUrl: /
+  concurrentSpawnLimit: 64
+  consecutiveFailureLimit: 5
+  db:
+    password: null
+    pvc:
+      accessModes:
+      - ReadWriteOnce
+      annotations: {}
+      selector: {}
+      storage: 1Gi
+      storageClassName: null
+      subPath: null
+    type: sqlite-pvc
+    upgrade: null
+    url: null
+  deploymentStrategy:
+    type: Recreate
+  extraConfig: {}
+  extraContainers: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  fsGid: 1000
+  image:
+    name: jupyterhub/k8s-hub
+    tag: 0.9.0
+  imagePullSecret:
+    email: null
+    enabled: false
+    password: null
+    registry: null
+    username: null
+  initContainers: []
+  labels: {}
+  livenessProbe:
+    enabled: false
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  namedServerLimitPerUser: null
+  networkPolicy:
+    egress:
+    - to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+    enabled: false
+    ingress: []
+  nodeSelector: {}
+  pdb:
+    enabled: true
+    minAvailable: 1
+  publicURL: null
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 0
+    periodSeconds: 10
+  redirectToServer: null
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+  service:
+    annotations: {}
+    loadBalancerIP: null
+    ports:
+      nodePort: null
+    type: ClusterIP
+  services: {}
+  shutdownOnLogout: null
+  templatePaths: []
+  templateVars: {}
+  uid: 1000
+scheduling:
+  corePods:
+    nodeAffinity:
+      matchNodePurpose: prefer
+  podPriority:
+    defaultPriority: 0
+    enabled: false
+    globalDefault: false
+    userPlaceholderPriority: -10
+  userPlaceholder:
+    enabled: true
+    replicas: 0
+  userPods:
+    nodeAffinity:
+      matchNodePurpose: prefer
+  userScheduler:
+    enabled: true
+    image:
+      name: gcr.io/google_containers/kube-scheduler-amd64
+      tag: v1.13.12
+    logLevel: 4
+    nodeSelector: {}
+    pdb:
+      enabled: true
+      minAvailable: 1
+    policy: {}
+    replicas: 2
+    resources:
+      requests:
+        cpu: 50m
+        memory: 256Mi
+singleuser:
+  cloudMetadata:
+    enabled: false
+    ip: 169.254.169.254
+  cmd: jupyterhub-singleuser
+  cpu:
+    guarantee: null
+    limit: null
+  defaultUrl: null
+  events: true
+  extraAnnotations: {}
+  extraContainers: []
+  extraEnv: {}
+  extraLabels:
+    hub.jupyter.org/network-access-hub: "true"
+  extraNodeAffinity:
+    preferred: []
+    required: []
+  extraPodAffinity:
+    preferred: []
+    required: []
+  extraPodAntiAffinity:
+    preferred: []
+    required: []
+  extraPodConfig: {}
+  extraResource:
+    guarantees: {}
+    limits: {}
+  extraTolerations: []
+  fsGid: 100
+  image:
+    name: jupyterhub/k8s-singleuser-sample
+    pullPolicy: IfNotPresent
+    tag: 0.9.0
+  imagePullSecret:
+    email: null
+    enabled: false
+    registry: null
+    username: null
+  initContainers: []
+  lifecycleHooks: {}
+  memory:
+    guarantee: 1G
+    limit: null
+  networkPolicy:
+    egress:
+    - to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+          except:
+          - 169.254.169.254/32
+    enabled: false
+    ingress: []
+  networkTools:
+    image:
+      name: jupyterhub/k8s-network-tools
+      tag: 0.9.0
+  nodeSelector: {}
+  serviceAccountName: null
+  startTimeout: 300
+  storage:
+    capacity: 10Gi
+    dynamic:
+      pvcNameTemplate: claim-{username}{servername}
+      storageAccessModes:
+      - ReadWriteOnce
+      storageClass: null
+      volumeNameTemplate: volume-{username}{servername}
+    extraLabels: {}
+    extraVolumeMounts: 
+      - name: iventura-lib
+        mountPath: /home/iventura/.local/lib
+      - name: iventura-bin
+        mountPath: /home/iventura/.local/bin
+    extraVolumes:
+      - name: iventura-lib
+        persistentVolumeClaim:
+          claimName: iventura-lib
+      - name: iventura-bin
+        persistentVolumeClaim:
+          claimName: iventura-bin
+    homeMountPath: /home/MyData
+    static:
+      pvcName: null
+      subPath: '{username}'
+    type: dynamic
+  uid: 1000
+
+z2jh.py:
+----
+"""
+Utility methods for use in jupyterhub_config.py and dynamic subconfigs.
+
+Methods here can be imported by extraConfig in values.yaml
+"""
+from collections import Mapping
+from functools import lru_cache
+import os
+
+import yaml
+
+
+# memoize so we only load config once
+@lru_cache()
+def _load_config():
+    """Load configuration from disk
+
+    Memoized to only load once
+    """
+    cfg = {}
+    for source in ('config', 'secret'):
+        path = f"/opt/app-root/configs/values.yaml"
+        if os.path.exists(path):
+            print(f"Loading {path}")
+            with open(path) as f:
+                values = yaml.safe_load(f)
+            cfg = _merge_dictionaries(cfg, values)
+        else:
+            print(f"No config at {path}")
+    return cfg
+
+
+def _merge_dictionaries(a, b):
+    """Merge two dictionaries recursively.
+
+    Simplified From https://stackoverflow.com/a/7205107
+    """
+    merged = a.copy()
+    for key in b:
+        if key in a:
+            if isinstance(a[key], Mapping) and isinstance(b[key], Mapping):
+                merged[key] = _merge_dictionaries(a[key], b[key])
+            else:
+                merged[key] = b[key]
+        else:
+            merged[key] = b[key]
+    return merged
+
+
+def get_config(key, default=None):
+    """
+    Find a config item of a given name & return it
+
+    Parses everything as YAML, so lists and dicts are available too
+
+    get_config("a.b.c") returns config['a']['b']['c']
+    """
+    value = _load_config()
+    # resolve path in yaml
+    for level in key.split('.'):
+        if not isinstance(value, dict):
+            # a parent is a scalar or null,
+            # can't resolve full path
+            return default
+        if level not in value:
+            return default
+        else:
+            value = value[level]
+    return value
+
+
+def set_config_if_not_none(cparent, name, key):
+    """
+    Find a config item of a given name, set the corresponding Jupyter
+    configuration item if not None
+    """
+    data = get_config(key)
+    if data is not None:
+        setattr(cparent, name, data)
